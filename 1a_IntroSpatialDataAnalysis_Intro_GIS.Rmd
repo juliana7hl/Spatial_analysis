@@ -1,0 +1,189 @@
+---
+title: "Introduction to GIS"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+What is a geographic information system (GIS)? While often thought of as means to making maps, the more basic utility of a GIS is the ability to overlay diverse spatial data layers. This is something that flat maps didn't allow us to do, and is best gotten across with an example. Let's start with tabular data on the point locations of detention basins (boring data that provides a great example!). In the process of working with this data you will be introduced to several topics (coordinate systems, vector and raster data) that we treat in more depth later.
+
+Let's first consider coordinates. Web services like Google Maps have locations across much of the world mapped to lat-long coordinates. When these locations are polygons (e.g. Athens-Clarke County), Google Maps has an associated centroid (the approximate geographic center of the polygon) and bounding box. So we can actually retrieve the coordinates of named locations by geocoding, basically an API call. Since Google now charges, we'll use OpenStreetMap instead :)
+
+IMPORTANT! I don't usually put paths to the data in my code. You will need to set the path if you did not put this .rmd in the folder with the data. If you did, you can go to the Session dropdown and Set Workspace to Source File Location.
+
+```{r}
+library(tmaptools)
+acc<-geocode_OSM("Athens-Clarke County")
+acc$coords
+acc$bbox
+```
+
+I have a bunch of herbarium data on the occurrences of rare plants associated with granite outcrops in the Southeast. Unfortunately, until recently, botanists collecting these specimens did not report coordinates. Nevertheless, many times location names can be used to generate coordinates. Many place names, by themselves, are not unique, but usually are if combined with the county and state they're in. Let's see if we can get correct coordinates for Echols Mill (now quarried) nearby in Oglethorpe county using just the place name.
+
+```{r}
+em1<-geocode_OSM("Echols Mill")
+em2<-geocode_OSM("Echols Mill, Oglethorpe, Georgia")
+```
+
+When we don't supply more detail, we get the centroid of Echols county in south Georgia on the Florida line. But when we do, we get the Echols Mill I had in mind.
+If you're geocoding, you will definitely want to doublecheck your coordinates by overlaying them on a map of the region of interest to make sure the API is making the right associations! Below, we'll see how to overlay points on polygons to do a spatial join to collect the info you would need to check against for accuracy.
+
+To illustrate, let's bring in a .csv that contains the point locations of detention basins in Sandy Springs, which is near Atlanta in Fulton county (http://www.fultoncountyga.gov/fcgis-geospatial-data). 
+
+```{r}
+# Bring in Sandy Springs detention basin points from Fulton County GIS website 
+dbasins<-read.csv("Stormwater_Basins__Ponds__Hosted___Sandy_Springs_Georgia.csv")
+
+# Take a look at the data
+head(dbasins)
+```
+
+Notice that there is an X and Y column giving the longitude and latitude of the location of each pond. But also a series of attributes for each pond, both categorical and continuous.
+
+```{r}
+# What are the categories?
+unique(dbasins$BasinType)
+unique(dbasins$BasinSurf)
+unique(dbasins$ConstructType)
+```
+
+We can explore these attributes without considering space. How many ponds by type, whether surface or underground, and construction type?
+
+```{r}
+# Aggregate data by categories
+dbtypes<-with(dbasins,table(BasinType,BasinSurf,ConstructType))
+dbtypes<-as.data.frame(dbtypes)
+head(dbtypes)
+```
+
+We can also graph non-spatial summaries of the attribute data.
+First by categories.
+
+```{r}
+# Load graphics package
+library(ggplot2)
+
+# Make barplot of frequencies across categories
+ggplot(data=dbtypes, aes(y=Freq,x=BasinType,fill=ConstructType)) + 
+  geom_bar( stat="identity") + 
+  facet_grid(~BasinSurf) + 
+  labs(y = "Count") + 
+  labs(x = "") + 
+  theme(legend.position="bottom") +
+  theme(legend.position="bottom", 
+        axis.text.x = element_text(angle = 45, hjust = 1)) #add angles to read x-axis
+```
+
+Now by categorical and continuous fields.
+
+```{r}
+# Get age
+dbasins$Age<-2019-dbasins$DateCreated
+
+# Show age range by construction type 
+ggplot(data=dbasins, aes(y=Age,x=ConstructType,fill=ConstructType)) + 
+  geom_violin() + coord_flip() +
+  theme(legend.position="") +
+  labs(x = "")
+```
+
+To make use of the spatial component of the data in R, we need to convert the table to a spatial points dataframe (SPDF). I discuss data formats in more detail in the zoom recording.
+
+```{r}
+# load sp package
+library(sp)
+
+# First let's look at arguments for the command SpatialPointsDataFrame
+?SpatialPointsDataFrame
+```
+
+To convert to SPDF, we need the CORRECT descripton of the coordinate system. Note that coordinates in dbasins are given as X,Y, but are lat-long, which is long-lat in X-Y order.
+
+```{r}
+# In this case the coordinates are lat-long so the value of the argument is
+# CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+dbasin_pts<-SpatialPointsDataFrame(dbasins[,1:2],
+              dbasins, 
+              coords.nrs = numeric(0), 
+              proj4string = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+```
+
+Now let's take a quick look to make sure the points seem okay. The plot shows basically the shape of north Fulton county which is where the points should be.
+
+```{r}
+plot(dbasin_pts)
+```
+
+Let's look at the description of the SPDF. Notice that we now have points that can be displayed in 2D space that also have attributes linked to them.
+
+```{r}
+dbasin_pts
+```
+
+Similar to the geocoding example above, with these spatial points, we can make API calls through R packages to acquire, for example, elevation data from the USGS Elevation Point Query Service.
+
+```{r}
+library(elevatr)
+dbasins_subset<-dbasin_pts[1:10,]
+dbasins_subset<-get_elev_point(dbasins_subset)
+dbasins_subset
+```
+
+Now let's bring in another layer. A shapefile of subwatershed polygons from USGS (U.S. Geological Survey, National Geospatial Program, 20200505, USGS National Hydrography Dataset Best Resolution (NHD) for Hydrologic Unit (HU) 8 - 03130001 (published 20200505): U.S. Geological Survey.). I downloaded this data using the National Map viewer website (https://viewer.nationalmap.gov/advanced-viewer/).
+
+Note that the shapefile has become the standard format in which vector GIS data is usually served. Although developed originally by ESRI, it has become non-proprietary. 
+IMPORTANT to note that a single shapefile is really a set of linked files (.shp, .dbf, .shx, .prj) that are all required, but are all called by using "filename.shp".
+
+```{r}
+# Load raster package
+library(raster)
+
+# Bring in the 12 digit hydrologic units (HUC)
+hucs12<-shapefile("Hydrologic_Units_Subwatershed.shp")
+```
+
+What is the coordinate system of the hucs? Is it also lat-long (aka unprojected, aka geographic)? How can we find out?
+
+```{r}
+crs(hucs12)
+```
+
+Now let's overlay these layers to browse the data in R. You can zoom in or out and clip on points or polygons to see the attributes.
+
+```{r}
+# Load mapview package to interactively view layers
+library(mapview)
+
+# View
+#mapview(dbasin_pts) + mapview(hucs12)
+```
+
+Let's add the name of the 12 digit subwatershed to the attributes of the detention basin points to allow us to look at differences between subwatersheds in say the density of detention ponds. This is known as a spatial join.
+
+```{r}
+# Get HUC 12 watershed name of each retention basin
+dbn_hucs<-over(dbasin_pts,hucs12)
+head(dbn_hucs)
+
+# Add HUC 12 name to detention basin SPDF
+dbasin_pts@data<-cbind(dbasin_pts@data,dbn_hucs$HU_12_NAME)
+
+# Let's look at the dbasin.pts attribute table now
+dbasin_pts
+```
+
+Now, we can write out dbasin_pts as a shapefile that can be brought in to other GIS software and will retain the new information we have collected.
+
+```{r}
+library(raster)
+shapefile(dbasin_pts,"dbasin_pts.shp", overwrite=T)
+```
+
+Or, the dbasin_pts spatial points data frame can be stored within a saved R workspace or .RData file. Please save this workspace so that you can load it in the next exercise.
+
+```{r}
+save.image("intro.RData")
+```
+
+We have just worked through a simple example of overlaying spatial data layers in order to transfer data from one layer to another. 
+
